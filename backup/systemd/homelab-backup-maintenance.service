@@ -1,0 +1,10 @@
+[Unit]
+Description=Homelab backup maintenance (prune + integrity check)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/homelab/backup
+ExecStart=/usr/bin/docker compose run --rm backup /scripts/prune.sh
+ExecStart=/usr/bin/docker compose run --rm backup /scripts/check.sh

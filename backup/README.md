@@ -1,0 +1,128 @@
+# Backup-Stack (restic → Google Drive, clientseitig verschlüsselt)
+
+Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank) und **VM-Dumps** (z. B. Proxmox `vzdump`) verschlüsselt nach **Google Drive**.
+
+## Architektur
+
+```
+Proxmox/Host ──vzdump──▶ /srv/vzdump ─┐
+/srv/immich ──────────────────────────┤
+/srv/nextcloud ───────────────────────┼─▶ restic (AES-256, clientseitig) ─▶ rclone ─▶ Google Drive
+DB-Container ──pg_dumpall/mysqldump──▶ /srv/backup-staging ─┘
+```
+
+- **restic** verschlüsselt und dedupliziert **vor dem Upload** (AES-256 + Poly1305). In Google Drive liegen nur verschlüsselte, nicht lesbare Chunks — Google (oder jemand mit Zugriff auf den Drive) sieht keine Klartextdaten.
+- **rclone** ist nur das Transport-Backend (`rclone:gdrive:...`).
+- Snapshots werden pro Quelle getaggt: `immich`, `nextcloud`, `vms`, `db`.
+
+## Voraussetzungen
+
+- Docker + Docker Compose auf dem Host
+- `rclone` lokal (einmalig, nur für die Ersteinrichtung des Google-Drive-Tokens)
+- Ein Google-Konto
+
+## Ersteinrichtung
+
+```bash
+cd backup
+cp .env.example .env
+# .env anpassen: Pfade, DB-Container, Retention
+
+# restic-Passwort erzeugen (WICHTIG: im Passwort-Manager sichern!)
+openssl rand -base64 32 > config/restic-password
+chmod 600 config/restic-password
+
+# rclone-Remote "gdrive" anlegen und config/rclone.conf erzeugen
+rclone config          # -> new remote "gdrive" -> Google Drive -> scope: drive.file
+# Headless-Host ohne Browser: lokal "rclone authorize \"gdrive\" \"<code>\"" ausführen
+# und die Ausgabe nach config/rclone.conf kopieren
+chmod 600 config/rclone.conf
+
+docker compose build
+docker compose run --rm backup /scripts/init.sh
+```
+
+**`scope = drive.file` verwenden** (statt `drive`): Der Token kann dann nur Dateien sehen/ändern, die rclone selbst angelegt hat — nicht den Rest deines Drives.
+
+**Sicherheit:** `.env`, `config/rclone.conf` und `config/restic-password` sind via `.gitignore` geschützt und dürfen **niemals committed** werden. Ohne das restic-Passwort ist ein Restore unmöglich — Passwort im Passwort-Manager ablegen und getrennt vom Repo aufbewahren.
+
+Hinweis: Der Container mountet `/var/run/docker.sock`, damit er per `docker exec` die DB-Dumps aus den Immich-/Nextcloud-DB-Containern ziehen kann. Auf einem dedizierten Backup-Host ist das üblich; alternativ die Dumps hostseitig erzeugen und nur `STAGING_DIR` mounten.
+
+## Betrieb
+
+```bash
+cd backup
+
+# Backup ausführen
+docker compose run --rm backup /scripts/backup.sh
+
+# Snapshots anzeigen
+docker compose run --rm backup /scripts/list.sh
+
+# Alte Snapshots aufräumen + Repository prüfen (Retention aus .env)
+docker compose run --rm backup /scripts/prune.sh
+docker compose run --rm backup /scripts/check.sh
+```
+
+### Automatisierung (systemd, auf dem Docker-Host)
+
+```bash
+sudo cp backup/systemd/homelab-backup*.{service,timer} /etc/systemd/system/
+sudo sed -i 's|/srv/homelab/backup|/PFAD/ZU/homelab/backup|' /etc/systemd/system/homelab-backup*.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now homelab-backup.timer homelab-backup-maintenance.timer
+```
+
+- `homelab-backup.timer`: täglich 03:00 Uhr Backup
+- `homelab-backup-maintenance.timer`: sonntags 04:00 Uhr prune + check
+
+Cron-Alternative: `0 3 * * * cd /srv/homelab/backup && docker compose run --rm backup /scripts/backup.sh`
+
+### VMs (Proxmox)
+
+`scripts/pve-vzdump.sh` läuft **auf dem Proxmox-Host** und legt `vzdump`-Archive in `VM_BACKUP_DIR` ab (werden als `/data/vms` in den Backup-Container gemountet):
+
+```bash
+# /etc/cron.d/pve-vzdump  (auf dem PVE-Host, vor dem Backup-Lauf)
+0 2 * * * root DUMP_DIR=/srv/vzdump MODE=snapshot VMIDS="100 101" /srv/homelab/backup/scripts/pve-vzdump.sh >> /var/log/pve-vzdump.log 2>&1
+```
+
+- `VMIDS` leer = alle VMs; `MODE=snapshot` braucht LVM/ZFS, sonst `stop`/`suspend`.
+- Ohne Proxmox: `VM_BACKUP_DIR` auf ein Verzeichnis mit VM-Disks/LVM-Snapshots zeigen lassen.
+
+## Restore
+
+```bash
+cd backup
+
+# komplette neueste Sicherung nach $RESTORE_DIR (hostseitig, siehe .env)
+docker compose run --rm backup /scripts/restore.sh latest /restore
+
+# nur Nextcloud aus einem bestimmten Snapshot
+docker compose run --rm backup /scripts/list.sh        # ID kopieren
+docker compose run --rm backup /scripts/restore.sh <SNAPSHOT-ID> /restore /data/nextcloud
+```
+
+Die Dateien liegen danach unter `$RESTORE_DIR/data/...` (restic stellt die vollständigen Pfade wieder her).
+
+**Immich-Datenbank wiederherstellen:**
+
+```bash
+docker exec -i immich_postgres psql -U postgres < $RESTORE_DIR/data/staging/dumps/immich-postgres.sql
+```
+
+## Konfiguration
+
+| Datei | Zweck |
+|---|---|
+| `.env` | Pfade, DB-Container, Retention (aus `.env.example` kopieren, gitignored) |
+| `config/rclone.conf` | Google-Drive-Token (gitignored, nie committen) |
+| `config/restic-password` | restic-Passwort (gitignored, im Passwort-Manager sichern!) |
+| `config/excludes/*.txt` | restic-Exclude-Dateien pro Quelle |
+
+## Hinweise
+
+- Immich: `thumbs/` und `encoded-video/` werden ausgeschlossen (werden von Immich neu generiert). In `.env` `IMMICH_DATA` auf das gesamte `UPLOAD_LOCATION` zeigen lassen.
+- Nextcloud: Datenverzeichnis + `config/` (enthält `config.php`) + DB-Dump werden gesichert.
+- `scripts/check.sh` prüft 5 % der Datenpakete (`restic check --read-data-subset=5%`); für einen Vollcheck ohne Subset-Flag ausführen.
+- Falls das Image-Build scheitert (`rclone` nicht im Alpine-Repo): statisches rclone-Binary von downloads.rclone.org im Dockerfile installieren.

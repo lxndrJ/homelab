@@ -1,0 +1,43 @@
+services:
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: homelab-backup:latest
+    hostname: homelab-backup
+    entrypoint: ["/bin/sh"]
+    restart: "no"
+    environment:
+      RESTIC_REPOSITORY: "rclone:${RCLONE_REMOTE:-gdrive}:${RCLONE_PATH:-homelab-backups}"
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RESTIC_CACHE_DIR: /cache
+      TZ: "${TZ:-Europe/Berlin}"
+      IMMICH_DB_CONTAINER: "${IMMICH_DB_CONTAINER:-}"
+      IMMICH_DB_TYPE: "${IMMICH_DB_TYPE:-postgres}"
+      IMMICH_DB_USER: "${IMMICH_DB_USER:-postgres}"
+      IMMICH_DB_PASSWORD: "${IMMICH_DB_PASSWORD:-}"
+      NEXTCLOUD_DB_CONTAINER: "${NEXTCLOUD_DB_CONTAINER:-}"
+      NEXTCLOUD_DB_TYPE: "${NEXTCLOUD_DB_TYPE:-mariadb}"
+      NEXTCLOUD_DB_USER: "${NEXTCLOUD_DB_USER:-nextcloud}"
+      NEXTCLOUD_DB_PASSWORD: "${NEXTCLOUD_DB_PASSWORD:-}"
+      KEEP_DAILY: "${KEEP_DAILY:-7}"
+      KEEP_WEEKLY: "${KEEP_WEEKLY:-4}"
+      KEEP_MONTHLY: "${KEEP_MONTHLY:-12}"
+      KEEP_YEARLY: "${KEEP_YEARLY:-3}"
+    volumes:
+      - ./config/rclone:/config/rclone:ro
+      - ./config/excludes:/config/excludes:ro
+      - ./scripts:/scripts:ro
+      - ./config/restic-password:/run/secrets/restic_password:ro
+      - ${IMMICH_DATA:-/srv/immich}:/data/immich:ro
+      - ${NEXTCLOUD_DATA:-/srv/nextcloud/data}:/data/nextcloud:ro
+      - ${NEXTCLOUD_CONFIG:-/srv/nextcloud/config}:/data/nextcloud-config:ro
+      - ${VM_BACKUP_DIR:-/srv/vzdump}:/data/vms:ro
+      - ${STAGING_DIR:-/srv/backup-staging}:/data/staging
+      - ${RESTORE_DIR:-/srv/restore}:/restore
+      - /var/run/docker.sock:/var/run/docker.sock
+      - restic-cache:/cache
+
+volumes:
+  restic-cache:

@@ -1,0 +1,4 @@
+.env
+config/rclone.conf
+config/restic-password
+*.log

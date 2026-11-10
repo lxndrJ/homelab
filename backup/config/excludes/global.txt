@@ -1,0 +1,7 @@
+*.tmp
+*.temp
+**/cache/**
+**/Cache/**
+**/.cache/**
+**/tmp/**
+**/lost+found/**

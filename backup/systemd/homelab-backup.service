@@ -1,0 +1,9 @@
+[Unit]
+Description=Homelab backup (restic -> Google Drive, client-side encrypted)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/homelab/backup
+ExecStart=/usr/bin/docker compose run --rm backup /scripts/backup.sh

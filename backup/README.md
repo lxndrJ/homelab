@@ -1,11 +1,11 @@
 # Backup-Stack (restic → Google Drive, clientseitig verschlüsselt)
 
-Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank), **VM-Dumps** (z. B. Proxmox `vzdump`) und **VM-Config-Exporte** (Ansible, siehe `ansible/`) verschlüsselt nach **Google Drive**.
+Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank), **VM-Dumps** (KVM/libvirt) und **VM-Config-Exporte** (Ansible, siehe `ansible/`) verschlüsselt nach **Google Drive**.
 
 ## Architektur
 
 ```
-Proxmox/Host ──vzdump──▶ /srv/vzdump ─┐
+libvirt-Host ──qemu-img/virsh──▶ /srv/vzdump ─┐
 /srv/immich ──────────────────────────┤
 /srv/nextcloud ───────────────────────┼─▶ restic (AES-256, clientseitig) ─▶ rclone ─▶ Google Drive
 DB-Container ──pg_dumpall/mysqldump──▶ /srv/backup-staging ─┘
@@ -83,17 +83,22 @@ Cron-Alternative: `0 3 * * * cd /srv/homelab/backup && docker compose run --rm b
 
 Der Ordner `ansible/` enthält ein Playbook, das **vor dem Backup-Lauf** (systemd: 02:30 Uhr) per SSH die Konfiguration aller VMs einsammelt und nach `/srv/vm-backups/ansible/<vm>` exportiert. Der Backup-Container nimmt das Verzeichnis als `/data/vm-config` mit auf und sichert es mit Tags `vm-config:<name>`. Siehe `ansible/README.md`.
 
-### VMs (Proxmox)
+### VMs (KVM/libvirt)
 
-`scripts/pve-vzdump.sh` läuft **auf dem Proxmox-Host** und legt `vzdump`-Archive in `VM_BACKUP_DIR` ab (werden als `/data/vms` in den Backup-Container gemountet):
+`scripts/libvirt-vm-backup.sh` läuft **auf dem libvirt-Host** und exportiert:
+
+- Domain-XMLs (`virsh dumpxml`) aller VMs nach `CONF_DIR` (Standard: `/srv/vm-backups/libvirt-config`, wird über `VM_CONFIG_DIR` mitgesichert)
+- Storage-Pool-XMLs, UEFI-NVRAM-Dateien und `/etc/libvirt/qemu`
+- optional mit `DUMP_IMAGES=yes`: qcow2-Images **gestoppter** VMs nach `VM_BACKUP_DIR` (`qemu-img convert`)
 
 ```bash
-# /etc/cron.d/pve-vzdump  (auf dem PVE-Host, vor dem Backup-Lauf)
-0 2 * * * root DUMP_DIR=/srv/vzdump MODE=snapshot VMIDS="100 101" /srv/homelab/backup/scripts/pve-vzdump.sh >> /var/log/pve-vzdump.log 2>&1
+# /etc/cron.d/libvirt-vm-backup  (auf dem KVM-Host, vor dem Backup-Lauf)
+0 2 * * * root CONF_DIR=/srv/vm-backups/libvirt-config DUMP_DIR=/srv/vzdump DUMP_IMAGES=no /srv/homelab/backup/scripts/libvirt-vm-backup.sh >> /var/log/libvirt-vm-backup.log 2>&1
 ```
 
-- `VMIDS` leer = alle VMs; `MODE=snapshot` braucht LVM/ZFS, sonst `stop`/`suspend`.
-- Ohne Proxmox: `VM_BACKUP_DIR` auf ein Verzeichnis mit VM-Disks/LVM-Snapshots zeigen lassen.
+- `DOMAINS` leer = alle VMs; sonst Liste von Domain-Namen.
+- Laufende VMs werden beim Image-Dump übersprungen (Shutdown oder `virsh backup-begin` für Live-Backups nutzen).
+- Restore einer VM-Definition: `virsh define <vm>.xml`; Disk-Image zurückkopieren und in der XML auf den Pfad zeigen lassen.
 
 ## Restore
 

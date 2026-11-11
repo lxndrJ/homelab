@@ -100,6 +100,40 @@ Der Ordner `ansible/` enthält ein Playbook, das **vor dem Backup-Lauf** (system
 - Laufende VMs werden beim Image-Dump übersprungen (Shutdown oder `virsh backup-begin` für Live-Backups nutzen).
 - Restore einer VM-Definition: `virsh define <vm>.xml`; Disk-Image zurückkopieren und in der XML auf den Pfad zeigen lassen.
 
+## Golden-Image-VMs (qcow2-Overlays)
+
+Tier-1/Tier-2-VMs können statt eigener Voll-Disks ein **Overlay (Copy-on-Write) auf einem read-only Basis-Image** nutzen:
+
+```
+/srv/images/ubuntu-base-v1.qcow2     (read-only, versioniert, liegt im restic-Backup)
+   ├── overlays/dns-vm.qcow2          (backing_file=base, nur Deltas)
+   └── overlays/docker-vm.qcow2       (OS-Overlay; Daten auf separater Disk ohne Backing-File!)
+```
+
+### Neue VM vom Basis-Image
+
+```bash
+BASE_IMAGE=/srv/images/ubuntu-base-v1.qcow2 VM_NAME=dns-vm OVERLAY_SIZE=20G \
+  /srv/homelab/backup/scripts/create-vm-from-base.sh
+```
+
+- Erzeugt `overlays/<VM_NAME>.qcow2` (`qemu-img create -b <base>`) und optional eine separate Daten-Disk (`DATA_DISK_SIZE=50G`).
+- Mit `XML_TEMPLATE=/srv/images/vm-template.xml` wird die VM direkt per `virsh define` registriert (Platzhalter: `__VM_NAME__`, `__OVERLAY__`, `__DATA_DISK__`).
+
+### Pflege-Regeln
+
+1. **Basis-Image nie verändern.** Updates = neue Datei (`ubuntu-base-v2.qcow2`), alte Version behalten; Basis-Images liegen mit im Backup.
+2. **Umstellen auf neue Basis:** `qemu-img rebase -b /srv/images/ubuntu-base-v2.qcow2 overlays/<vm>.qcow2` (VM vorher stoppen).
+3. **Maximal 2 Ebenen** (Basis + Overlay). Keine Overlays auf Overlays - die Backing-Chains werden sonst unübersichtlich.
+4. **Anwendungsdaten immer auf einer separaten Disk** ohne Backing-File; im Overlay nur OS/Config. Dann bleibt das Overlay klein.
+5. **Overlays aufräumen:** gelegentlich `virt-sparsify --in-place overlays/<vm>.qcow2` (VM gestoppt), sonst wachsen Logs/Caches das Overlay auf GB-Größe.
+
+### Backup-Auswirkungen
+
+- Basis-Image: einmal pro Version ins Backup (klein, dedupliziert gut).
+- Pro VM: Overlay (meist MB-Bereich) + Daten-Disk-Inhalte via restic + Ansible-Config-Export.
+- Für Overlay-basierte Tier-1-VMs ist `DUMP_IMAGES=yes` i. d. R. unnötig - Overlay + Config reichen zum Rebuild.
+
 ## Restore
 
 ```bash

@@ -1,0 +1,9 @@
+[Unit]
+Description=Homelab VM-Config-Export (Ansible, vor dem Backup-Lauf)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/homelab/ansible
+ExecStart=/usr/bin/ansible-playbook site.yml

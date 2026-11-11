@@ -1,6 +1,6 @@
 # Backup-Stack (restic → Google Drive, clientseitig verschlüsselt)
 
-Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank) und **VM-Dumps** (z. B. Proxmox `vzdump`) verschlüsselt nach **Google Drive**.
+Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank), **VM-Dumps** (z. B. Proxmox `vzdump`) und **VM-Config-Exporte** (Ansible, siehe `ansible/`) verschlüsselt nach **Google Drive**.
 
 ## Architektur
 
@@ -9,11 +9,12 @@ Proxmox/Host ──vzdump──▶ /srv/vzdump ─┐
 /srv/immich ──────────────────────────┤
 /srv/nextcloud ───────────────────────┼─▶ restic (AES-256, clientseitig) ─▶ rclone ─▶ Google Drive
 DB-Container ──pg_dumpall/mysqldump──▶ /srv/backup-staging ─┘
+VMs ──Ansible-Export──▶ /srv/vm-backups ─┘
 ```
 
 - **restic** verschlüsselt und dedupliziert **vor dem Upload** (AES-256 + Poly1305). In Google Drive liegen nur verschlüsselte, nicht lesbare Chunks — Google (oder jemand mit Zugriff auf den Drive) sieht keine Klartextdaten.
 - **rclone** ist nur das Transport-Backend (`rclone:gdrive:...`).
-- Snapshots werden pro Quelle getaggt: `immich`, `nextcloud`, `vms`, `db`.
+- Snapshots werden pro Quelle getaggt: `immich`, `nextcloud`, `vms`, `vm-config:<name>`, `db`.
 
 ## Voraussetzungen
 
@@ -34,7 +35,7 @@ chmod 600 config/restic-password
 
 # rclone-Remote "gdrive" anlegen und config/rclone.conf erzeugen
 rclone config          # -> new remote "gdrive" -> Google Drive -> scope: drive.file
-# Headless-Host ohne Browser: lokal "rclone authorize \"gdrive\" \"<code>\"" ausführen
+# Headless-Host ohne Browser: lokal "rclone authorize \\"gdrive\\" \\"<code>\\\"" ausführen
 # und die Ausgabe nach config/rclone.conf kopieren
 chmod 600 config/rclone.conf
 
@@ -77,6 +78,10 @@ sudo systemctl enable --now homelab-backup.timer homelab-backup-maintenance.time
 - `homelab-backup-maintenance.timer`: sonntags 04:00 Uhr prune + check
 
 Cron-Alternative: `0 3 * * * cd /srv/homelab/backup && docker compose run --rm backup /scripts/backup.sh`
+
+### VM-Config-Export (Ansible)
+
+Der Ordner `ansible/` enthält ein Playbook, das **vor dem Backup-Lauf** (systemd: 02:30 Uhr) per SSH die Konfiguration aller VMs einsammelt und nach `/srv/vm-backups/ansible/<vm>` exportiert. Der Backup-Container nimmt das Verzeichnis als `/data/vm-config` mit auf und sichert es mit Tags `vm-config:<name>`. Siehe `ansible/README.md`.
 
 ### VMs (Proxmox)
 
@@ -126,3 +131,5 @@ docker exec -i immich_postgres psql -U postgres < $RESTORE_DIR/data/staging/dump
 - Nextcloud: Datenverzeichnis + `config/` (enthält `config.php`) + DB-Dump werden gesichert.
 - `scripts/check.sh` prüft 5 % der Datenpakete (`restic check --read-data-subset=5%`); für einen Vollcheck ohne Subset-Flag ausführen.
 - Falls das Image-Build scheitert (`rclone` nicht im Alpine-Repo): statisches rclone-Binary von downloads.rclone.org im Dockerfile installieren.
+- VM-Config-Exporte können Secrets enthalten (`.env`-Dateien, App-Configs mit Passwörtern). Der Export auf dem Host sollte mit `chmod 700`/`600` laufen; restic verschlüsselt clientseitig, aber der Staging-Bereich auf dem Host ist Klartext.
+- Berechtigungen (uid/gid) bleiben beim Ansible-Export erhalten (`rsync -a` über `synchronize` als root). Beim Restore `tar --numeric-owner -p` bzw. `restic restore` als root verwenden.

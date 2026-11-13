@@ -1,0 +1,9 @@
+[Unit]
+Description=Tägl. VM-Config-Export per Ansible (02:30, vor Backup um 03:00)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

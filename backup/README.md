@@ -1,19 +1,20 @@
 # Backup-Stack (restic → Google Drive, clientseitig verschlüsselt)
 
-Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank) und **VM-Dumps** (z. B. Proxmox `vzdump`) verschlüsselt nach **Google Drive**.
+Sichert **Immich**, **Nextcloud** (Daten + Config + Datenbank), **VM-Dumps** (KVM/libvirt) und **VM-Config-Exporte** (Ansible, siehe `ansible/`) verschlüsselt nach **Google Drive**.
 
 ## Architektur
 
 ```
-Proxmox/Host ──vzdump──▶ /srv/vzdump ─┐
+libvirt-Host ──qemu-img/virsh──▶ /srv/vzdump ─┐
 /srv/immich ──────────────────────────┤
 /srv/nextcloud ───────────────────────┼─▶ restic (AES-256, clientseitig) ─▶ rclone ─▶ Google Drive
 DB-Container ──pg_dumpall/mysqldump──▶ /srv/backup-staging ─┘
+VMs ──Ansible-Export──▶ /srv/vm-backups ─┘
 ```
 
 - **restic** verschlüsselt und dedupliziert **vor dem Upload** (AES-256 + Poly1305). In Google Drive liegen nur verschlüsselte, nicht lesbare Chunks — Google (oder jemand mit Zugriff auf den Drive) sieht keine Klartextdaten.
 - **rclone** ist nur das Transport-Backend (`rclone:gdrive:...`).
-- Snapshots werden pro Quelle getaggt: `immich`, `nextcloud`, `vms`, `db`.
+- Snapshots werden pro Quelle getaggt: `immich`, `nextcloud`, `vms`, `vm-config:<name>`, `db`.
 
 ## Voraussetzungen
 
@@ -34,7 +35,7 @@ chmod 600 config/restic-password
 
 # rclone-Remote "gdrive" anlegen und config/rclone.conf erzeugen
 rclone config          # -> new remote "gdrive" -> Google Drive -> scope: drive.file
-# Headless-Host ohne Browser: lokal "rclone authorize \"gdrive\" \"<code>\"" ausführen
+# Headless-Host ohne Browser: lokal "rclone authorize \\"gdrive\\" \\"<code>\\\"" ausführen
 # und die Ausgabe nach config/rclone.conf kopieren
 chmod 600 config/rclone.conf
 
@@ -78,17 +79,60 @@ sudo systemctl enable --now homelab-backup.timer homelab-backup-maintenance.time
 
 Cron-Alternative: `0 3 * * * cd /srv/homelab/backup && docker compose run --rm backup /scripts/backup.sh`
 
-### VMs (Proxmox)
+### VM-Config-Export (Ansible)
 
-`scripts/pve-vzdump.sh` läuft **auf dem Proxmox-Host** und legt `vzdump`-Archive in `VM_BACKUP_DIR` ab (werden als `/data/vms` in den Backup-Container gemountet):
+Der Ordner `ansible/` enthält ein Playbook, das **vor dem Backup-Lauf** (systemd: 02:30 Uhr) per SSH die Konfiguration aller VMs einsammelt und nach `/srv/vm-backups/ansible/<vm>` exportiert. Der Backup-Container nimmt das Verzeichnis als `/data/vm-config` mit auf und sichert es mit Tags `vm-config:<name>`. Siehe `ansible/README.md`.
+
+### VMs (KVM/libvirt)
+
+`scripts/libvirt-vm-backup.sh` läuft **auf dem libvirt-Host** und exportiert:
+
+- Domain-XMLs (`virsh dumpxml`) aller VMs nach `CONF_DIR` (Standard: `/srv/vm-backups/libvirt-config`, wird über `VM_CONFIG_DIR` mitgesichert)
+- Storage-Pool-XMLs, UEFI-NVRAM-Dateien und `/etc/libvirt/qemu`
+- optional mit `DUMP_IMAGES=yes`: qcow2-Images **gestoppter** VMs nach `VM_BACKUP_DIR` (`qemu-img convert`)
 
 ```bash
-# /etc/cron.d/pve-vzdump  (auf dem PVE-Host, vor dem Backup-Lauf)
-0 2 * * * root DUMP_DIR=/srv/vzdump MODE=snapshot VMIDS="100 101" /srv/homelab/backup/scripts/pve-vzdump.sh >> /var/log/pve-vzdump.log 2>&1
+# /etc/cron.d/libvirt-vm-backup  (auf dem KVM-Host, vor dem Backup-Lauf)
+0 2 * * * root CONF_DIR=/srv/vm-backups/libvirt-config DUMP_DIR=/srv/vzdump DUMP_IMAGES=no /srv/homelab/backup/scripts/libvirt-vm-backup.sh >> /var/log/libvirt-vm-backup.log 2>&1
 ```
 
-- `VMIDS` leer = alle VMs; `MODE=snapshot` braucht LVM/ZFS, sonst `stop`/`suspend`.
-- Ohne Proxmox: `VM_BACKUP_DIR` auf ein Verzeichnis mit VM-Disks/LVM-Snapshots zeigen lassen.
+- `DOMAINS` leer = alle VMs; sonst Liste von Domain-Namen.
+- Laufende VMs werden beim Image-Dump übersprungen (Shutdown oder `virsh backup-begin` für Live-Backups nutzen).
+- Restore einer VM-Definition: `virsh define <vm>.xml`; Disk-Image zurückkopieren und in der XML auf den Pfad zeigen lassen.
+
+## Golden-Image-VMs (qcow2-Overlays)
+
+Tier-1/Tier-2-VMs können statt eigener Voll-Disks ein **Overlay (Copy-on-Write) auf einem read-only Basis-Image** nutzen:
+
+```
+/srv/images/ubuntu-base-v1.qcow2     (read-only, versioniert, liegt im restic-Backup)
+   ├── overlays/dns-vm.qcow2          (backing_file=base, nur Deltas)
+   └── overlays/docker-vm.qcow2       (OS-Overlay; Daten auf separater Disk ohne Backing-File!)
+```
+
+### Neue VM vom Basis-Image
+
+```bash
+BASE_IMAGE=/srv/images/ubuntu-base-v1.qcow2 VM_NAME=dns-vm OVERLAY_SIZE=20G \
+  /srv/homelab/backup/scripts/create-vm-from-base.sh
+```
+
+- Erzeugt `overlays/<VM_NAME>.qcow2` (`qemu-img create -b <base>`) und optional eine separate Daten-Disk (`DATA_DISK_SIZE=50G`).
+- Mit `XML_TEMPLATE=/srv/images/vm-template.xml` wird die VM direkt per `virsh define` registriert (Platzhalter: `__VM_NAME__`, `__OVERLAY__`, `__DATA_DISK__`).
+
+### Pflege-Regeln
+
+1. **Basis-Image nie verändern.** Updates = neue Datei (`ubuntu-base-v2.qcow2`), alte Version behalten; Basis-Images liegen mit im Backup.
+2. **Umstellen auf neue Basis:** `qemu-img rebase -b /srv/images/ubuntu-base-v2.qcow2 overlays/<vm>.qcow2` (VM vorher stoppen).
+3. **Maximal 2 Ebenen** (Basis + Overlay). Keine Overlays auf Overlays - die Backing-Chains werden sonst unübersichtlich.
+4. **Anwendungsdaten immer auf einer separaten Disk** ohne Backing-File; im Overlay nur OS/Config. Dann bleibt das Overlay klein.
+5. **Overlays aufräumen:** gelegentlich `virt-sparsify --in-place overlays/<vm>.qcow2` (VM gestoppt), sonst wachsen Logs/Caches das Overlay auf GB-Größe.
+
+### Backup-Auswirkungen
+
+- Basis-Image: einmal pro Version ins Backup (klein, dedupliziert gut).
+- Pro VM: Overlay (meist MB-Bereich) + Daten-Disk-Inhalte via restic + Ansible-Config-Export.
+- Für Overlay-basierte Tier-1-VMs ist `DUMP_IMAGES=yes` i. d. R. unnötig - Overlay + Config reichen zum Rebuild.
 
 ## Restore
 
@@ -126,3 +170,5 @@ docker exec -i immich_postgres psql -U postgres < $RESTORE_DIR/data/staging/dump
 - Nextcloud: Datenverzeichnis + `config/` (enthält `config.php`) + DB-Dump werden gesichert.
 - `scripts/check.sh` prüft 5 % der Datenpakete (`restic check --read-data-subset=5%`); für einen Vollcheck ohne Subset-Flag ausführen.
 - Falls das Image-Build scheitert (`rclone` nicht im Alpine-Repo): statisches rclone-Binary von downloads.rclone.org im Dockerfile installieren.
+- VM-Config-Exporte können Secrets enthalten (`.env`-Dateien, App-Configs mit Passwörtern). Der Export auf dem Host sollte mit `chmod 700`/`600` laufen; restic verschlüsselt clientseitig, aber der Staging-Bereich auf dem Host ist Klartext.
+- Berechtigungen (uid/gid) bleiben beim Ansible-Export erhalten (`rsync -a` über `synchronize` als root). Beim Restore `tar --numeric-owner -p` bzw. `restic restore` als root verwenden.

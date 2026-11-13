@@ -1,0 +1,72 @@
+---
+- name: VM-Config-Export für das restic-Backup
+  hosts: pve_vms
+  gather_facts: true
+  vars:
+    export_root: /srv/vm-backups/ansible
+    export_dir: "{{ export_root }}/{{ inventory_hostname }}"
+  tasks:
+    - name: Export-Verzeichnisse anlegen
+      become: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ export_dir }}/{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: [etc, compose, packages, facts]
+
+    - name: Paketliste exportieren
+      ansible.builtin.command: dpkg --get-selections
+      register: pkgs
+      changed_when: false
+
+    - name: Paketliste ablegen
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ pkgs.stdout }}"
+        dest: "{{ export_dir }}/packages/installed.txt"
+        mode: "0644"
+
+    - name: System-Facts exportieren
+      ansible.builtin.copy:
+        content: "{{ ansible_facts | to_nice_yaml }}"
+        dest: /tmp/facts.yaml
+        mode: "0600"
+      changed_when: false
+
+    - name: Facts abholen
+      ansible.builtin.fetch:
+        src: /tmp/facts.yaml
+        dest: "{{ export_dir }}/facts/facts.yaml"
+        flat: true
+
+    - name: Relevante /etc-Teile einsammeln
+      become: true
+      ansible.builtin.synchronize:
+        mode: pull
+        src: "{{ item }}"
+        dest: "{{ export_dir }}/etc/"
+      loop:
+        - /etc/network/
+        - /etc/netplan/
+        - /etc/fstab
+        - /etc/hosts
+        - /etc/systemd/system/
+        - /etc/cron.d/
+      failed_when: false   # nicht jede VM hat alle Pfade
+
+    - name: Docker-Compose-Stapel einsammeln
+      become: true
+      ansible.builtin.synchronize:
+        mode: pull
+        src: "{{ item }}"
+        dest: "{{ export_dir }}/compose/"
+      loop: "{{ compose_dirs | default([]) }}"
+
+    - name: Zusätzliche Config-Pfade einsammeln
+      become: true
+      ansible.builtin.synchronize:
+        mode: pull
+        src: "{{ item }}"
+        dest: "{{ export_dir }}/etc/"
+      loop: "{{ config_dirs | default([]) }}"

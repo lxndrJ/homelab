@@ -1,0 +1,11 @@
+# Beispiel-Host-Var: ansible/host_vars/docker-vm.yml
+# Echte Datei NICHT committen, nur das Template hier.
+
+# Docker-Compose-Stapel, die komplett (inkl. .env) exportiert werden
+compose_dirs:
+  - /opt/nextcloud/
+  - /opt/immich/
+
+# Zusätzliche Config-Pfade der VM
+config_dirs:
+  - /etc/AdGuardHome.yaml

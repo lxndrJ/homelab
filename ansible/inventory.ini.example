@@ -1,0 +1,8 @@
+# Proxmox-VMs, deren Config exportiert wird (Ansible läuft auf dem Backup-Host)
+# Echte Datei als inventory.ini anlegen und NICHT committen (interne IPs).
+[pve_vms]
+dns-vm      ansible_host=192.168.1.10 ansible_user=root
+docker-vm   ansible_host=192.168.1.20 ansible_user=root
+
+[pve_vms:vars]
+export_root=/srv/vm-backups/ansible

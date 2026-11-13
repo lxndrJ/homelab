@@ -69,6 +69,17 @@ else
   log "skip vms (/data/vms empty or not mounted)"
 fi
 
+if [ -d /data/vm-config ] && [ -n "$(ls -A /data/vm-config 2>/dev/null)" ]; then
+  log "backing up vm config exports"
+  for dir in /data/vm-config/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    restic backup "$dir" --tag "vm-config:$name" --exclude-file /config/excludes/global.txt
+  done
+else
+  log "skip vm config exports (/data/vm-config empty or not mounted)"
+fi
+
 if ls "$DUMPS"/*.sql >/dev/null 2>&1; then
   log "backing up db dumps"
   restic backup "$DUMPS" --tag db

@@ -34,6 +34,7 @@ services:
       - ${NEXTCLOUD_DATA:-/srv/nextcloud/data}:/data/nextcloud:ro
       - ${NEXTCLOUD_CONFIG:-/srv/nextcloud/config}:/data/nextcloud-config:ro
       - ${VM_BACKUP_DIR:-/srv/vzdump}:/data/vms:ro
+      - ${VM_CONFIG_DIR:-/srv/vm-backups}:/data/vm-config:ro
       - ${STAGING_DIR:-/srv/backup-staging}:/data/staging
       - ${RESTORE_DIR:-/srv/restore}:/restore
       - /var/run/docker.sock:/var/run/docker.sock
